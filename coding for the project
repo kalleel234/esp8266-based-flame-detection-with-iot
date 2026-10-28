@@ -1,0 +1,188 @@
+#include <ESP8266WiFi.h>
+#include <ESP8266WebServer.h>
+
+// ================= WIFI SETTINGS =================
+// Enter your Wi-Fi details here. If left unchanged, the ESP8266
+// will create its own Wi-Fi hotspot instead.
+const char* WIFI_SSID = "YOUR_WIFI_NAME";
+const char* WIFI_PASSWORD = "YOUR_WIFI_PASSWORD";
+
+const char* AP_SSID = "PyroGuard-Fire-Monitor";
+const char* AP_PASSWORD = "PyroGuard32";  // At least 8 characters
+
+// ================= FLAME SENSOR =================
+// Connect flame sensor DO to NodeMCU D5 (GPIO14).
+// For most digital flame sensor modules, LOW means flame detected.
+const int FLAME_SENSOR_PIN = D5;
+const bool FLAME_ACTIVE_LOW = true;
+
+ESP8266WebServer server(80);
+
+// ================= WEB DASHBOARD =================
+const char INDEX_HTML[] PROGMEM = R"rawliteral(
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>ESP8266 PYROGUARD FIRE MONITOR</title>
+  <style>
+    body {
+      background: #050505;
+      color: white;
+      font-family: Arial, sans-serif;
+      text-align: center;
+      padding: 40px 10px;
+    }
+    main {
+      max-width: 650px;
+      min-height: 200px;
+      margin: auto;
+      padding: 25px 10px;
+      border: 1px solid #555;
+      border-radius: 5px;
+    }
+    h1 { font-size: 24px; margin-bottom: 30px; }
+    #status { font-size: 28px; font-weight: bold; }
+    .safe { color: #00e676; }
+    .fire { color: #ff3547; }
+    #detail { color: #aaa; font-size: 13px; margin-top: 25px; }
+  </style>
+</head>
+<body>
+  <main>
+    <h1>ESP8266 PYROGUARD FIRE MONITOR</h1>
+    <p id="status" class="safe">CHECKING SENSOR...</p>
+    <div id="detail">Connecting to ESP8266...</div>
+  </main>
+  <script>
+    async function updateStatus() {
+      try {
+        const response = await fetch('/status', { cache: 'no-store' });
+        if (!response.ok) throw new Error('Status request failed');
+        const data = await response.json();
+        const status = document.getElementById('status');
+        if (data.flame) {
+          status.className = 'fire';
+          status.textContent = 'FIRE DETECTED';
+        } else {
+          status.className = 'safe';
+          status.textContent = 'SAFE';
+        }
+        document.getElementById('detail').textContent =
+          'Sensor reading: ' + data.sensor + ' | Live update every second';
+      } catch (error) {
+        document.getElementById('status').className = 'fire';
+        document.getElementById('status').textContent = 'ESP8266 CONNECTION LOST';
+        document.getElementById('detail').textContent =
+          'Check Wi-Fi and refresh the page.';
+      }
+    }
+    updateStatus();
+    setInterval(updateStatus, 1000);
+  </script>
+</body>
+</html>
+)rawliteral";
+
+// ================= FLAME DETECTION =================
+bool isFlameDetected(int sensorReading) {
+  if (FLAME_ACTIVE_LOW) {
+    return sensorReading == LOW;
+  }
+  return sensorReading == HIGH;
+}
+
+// ================= WEB PAGE =================
+void handleRoot() {
+  server.send_P(200, "text/html", INDEX_HTML);
+}
+
+// ================= STATUS API =================
+void handleStatus() {
+  int reading = digitalRead(FLAME_SENSOR_PIN);
+  bool flameDetected = isFlameDetected(reading);
+
+  String json = "{\"flame\":";
+  json += (flameDetected ? "true" : "false");
+  json += ",\"sensor\":";
+  json += String(reading);
+  json += "}";
+
+  server.sendHeader("Cache-Control", "no-store");
+  server.send(200, "application/json", json);
+}
+
+// ================= CREATE WIFI HOTSPOT =================
+void startAccessPoint() {
+  WiFi.mode(WIFI_AP);
+  bool started = WiFi.softAP(AP_SSID, AP_PASSWORD);
+
+  Serial.println();
+  if (started) {
+    Serial.println("Wi-Fi hotspot started!");
+    Serial.print("Wi-Fi name: ");
+    Serial.println(AP_SSID);
+    Serial.print("Wi-Fi password: ");
+    Serial.println(AP_PASSWORD);
+    Serial.print("Open browser at: http://");
+    Serial.println(WiFi.softAPIP());
+  } else {
+    Serial.println("Failed to start Wi-Fi hotspot.");
+  }
+}
+
+// ================= CONNECT TO WIFI =================
+void connectWiFiOrStartAP() {
+  bool credentialsProvided =
+    String(WIFI_SSID) != "YOUR_WIFI_NAME" &&
+    String(WIFI_SSID).length() > 0;
+
+  if (credentialsProvided) {
+    WiFi.mode(WIFI_STA);
+    WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
+    Serial.print("Connecting to Wi-Fi");
+
+    unsigned long startTime = millis();
+    while (WiFi.status() != WL_CONNECTED && millis() - startTime < 15000) {
+      delay(500);
+      Serial.print(".");
+      yield();
+    }
+    Serial.println();
+
+    if (WiFi.status() == WL_CONNECTED) {
+      Serial.println("Wi-Fi connected!");
+      Serial.print("Open this address: http://");
+      Serial.println(WiFi.localIP());
+      return;
+    }
+    Serial.println("Wi-Fi connection failed. Starting hotspot.");
+  }
+
+  startAccessPoint();
+}
+
+// ================= SETUP =================
+void setup() {
+  Serial.begin(115200);
+  delay(300);
+  pinMode(FLAME_SENSOR_PIN, INPUT);
+
+  connectWiFiOrStartAP();
+
+  server.on("/", HTTP_GET, handleRoot);
+  server.on("/status", HTTP_GET, handleStatus);
+  server.onNotFound([]() {
+    server.send(404, "text/plain", "Page not found");
+  });
+
+  server.begin();
+  Serial.println("PyroGuard Fire Monitor is running!");
+}
+
+// ================= MAIN LOOP =================
+void loop() {
+  server.handleClient();
+  yield();
+}
